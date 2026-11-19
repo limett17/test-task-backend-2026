@@ -207,6 +207,10 @@ class Lead(BaseEntity):
         self.companies = []
         if not _embedded:
             return
+        if _embedded.get(COMPANIES):
+            self.companies = _embedded.get(COMPANIES)
+        if _embedded.get(CONTACTS):
+            self.contacts = _embedded.get(CONTACTS)
 
 
 def amocrm_get(obj_cls: Type[BaseEntity],
