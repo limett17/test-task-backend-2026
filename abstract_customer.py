@@ -1,7 +1,7 @@
 import json
 import logging
 from collections import defaultdict
-from typing import Optional, Dict
+from typing import Optional, Dict, Tuple, List
 
 from sqlalchemy import text
 
@@ -93,55 +93,84 @@ def get_abccustomer_by_amocustomer_login(customer_login: str) -> Optional[Abstra
     return customers[0]
 
 
-def create_or_update_customer(abstract_customer: Optional[AbstractCustomer], amo_customer: Customer):
+def preload_customer_indexes() -> Tuple[Dict[int, int], Dict[str, List[int]]]:
+    by_crm_id: Dict[int, int] = {}
+    by_login: Dict[str, List[int]] = defaultdict(list)
+    stmt = text("""
+        SELECT ac.id AS abc_id,
+               (elem->'general'->>'id')::bigint AS crm_id,
+               elem->'general'->>'login' AS login
+        FROM abstract_customer ac,
+             jsonb_array_elements(ac.amo_customers) AS elem
+        WHERE ac.amo_customers IS NOT NULL
+          AND jsonb_typeof(ac.amo_customers) = 'array'
+    """)
+    for row in db.session.execute(stmt):
+        if row.crm_id is not None:
+            by_crm_id[row.crm_id] = row.abc_id
+        if row.login:
+            by_login[row.login].append(row.abc_id)
+    return by_crm_id, by_login
+
+
+def preload_lead_indexes() -> Tuple[Dict[int, int], Dict[str, List[int]]]:
+    by_crm_id: Dict[int, int] = {}
+    by_login: Dict[str, List[int]] = defaultdict(list)
+    stmt = text("""
+        SELECT ac.id AS abc_id,
+               (elem->'general'->>'id')::bigint AS crm_id,
+               elem->'general'->>'login' AS login
+        FROM abstract_customer ac,
+             jsonb_array_elements(ac.amo_leads) AS elem
+        WHERE ac.amo_leads IS NOT NULL
+          AND jsonb_typeof(ac.amo_leads) = 'array'
+    """)
+    for row in db.session.execute(stmt):
+        if row.crm_id is not None:
+            by_crm_id[row.crm_id] = row.abc_id
+        if row.login:
+            by_login[row.login].append(row.abc_id)
+    return by_crm_id, by_login
+
+
+def create_or_update_customer(abstract_customer: Optional[AbstractCustomer],
+                              amo_customer: Customer) -> AbstractCustomer:
+    new_json = get_customer_json(amo_customer)
     if abstract_customer is None:
-        new_abstract_customer = AbstractCustomer(
-            amo_customers=[get_customer_json(amo_customer)],
+        obj = AbstractCustomer(
+            amo_customers=[new_json],
         )
-        db.session.add(new_abstract_customer)
-        return new_abstract_customer
+        db.session.add(obj)
+        return obj
 
-    abc_amo_customers = abstract_customer.amo_customers
-    if not abc_amo_customers:
-        # Не было покупателей
-        abstract_customer.amo_customers = [get_customer_json(amo_customer)]
-        return abstract_customer
-
-    index = [idx for idx, c in enumerate(abstract_customer.amo_customers) if c['general']['id'] == amo_customer.id]
-    if not index:
-        index = len(abstract_customer.amo_customers) + 1
-    else:
-        index = index[0]
-
-    update_jsonb_field(entity_id=abstract_customer.id,
-                       attribute=AbcCustomerEntities.AmoCustomer,
-                       index=index,
-                       new_value=get_customer_json(amo_customer))
+    current = list(abstract_customer.amo_customers or [])
+    replaced = False
+    for i, item in enumerate(current):
+        if (item.get('general') or {}).get('id') == amo_customer.id:
+            current[i] = new_json
+            replaced = True
+            break
+    if not replaced:
+        current.append(new_json)
+    abstract_customer.amo_customers = current
     return abstract_customer
 
 
 def create_or_update_lead(abc_customer: Optional[AbstractCustomer], amo_lead: Lead) -> AbstractCustomer:
+    new_json = get_lead_json(amo_lead)
     if abc_customer is None:
-        new_abstract_customer = AbstractCustomer(
-            amo_leads=[get_lead_json(amo_lead)])
-        db.session.add(new_abstract_customer)
-        db.session.commit()
-        return new_abstract_customer
+        obj = AbstractCustomer(amo_leads=[new_json])
+        db.session.add(obj)
+        return obj
 
-    if not abc_customer.amo_leads:
-        abc_customer.amo_leads = [get_lead_json(amo_lead)]
-        db.session.commit()
-        return abc_customer
-
-    index = [idx for idx, c in enumerate(abc_customer.amo_leads) if c['general']['id'] == amo_lead.id]
-    if not index:
-        index = len(abc_customer.amo_leads) + 1
-    else:
-        index = index[0]
-
-    update_jsonb_field(entity_id=abc_customer.id,
-                       attribute=AbcCustomerEntities.AmoLead,
-                       index=index,
-                       new_value=get_lead_json(amo_lead))
-    db.session.commit()
+    current = list(abc_customer.amo_leads or [])
+    replaced = False
+    for i, item in enumerate(current):
+        if (item.get('general') or {}).get('id') == amo_lead.id:
+            current[i] = new_json
+            replaced = True
+            break
+    if not replaced:
+        current.append(new_json)
+    abc_customer.amo_leads = current
     return abc_customer
